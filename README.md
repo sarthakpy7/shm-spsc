@@ -147,6 +147,11 @@ make bench      # throughput + latency
 make asan       # tests under AddressSanitizer + UBSan
 ```
 
+The blocking `push`/`pop` spin, yielding once per 4096 attempts, so they still
+make progress when oversubscribed. Even so, the fuzz tests move millions of
+messages between two processes and assume **at least 2 cores** — on a
+single-core VM or container they will finish, but slowly.
+
 Two-terminal demo — the consumer owns the segment, so start it first:
 
 ```sh

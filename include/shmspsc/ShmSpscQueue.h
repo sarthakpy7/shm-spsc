@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #pragma once
 
+#include <sched.h>
 #include <signal.h>
 #include <unistd.h>
 
@@ -329,6 +330,7 @@ public:
         if (!peerAlive()) {
           return false;
         }
+        ::sched_yield(); // degrade gracefully when oversubscribed
         spins = 0;
       }
     }
@@ -343,6 +345,7 @@ public:
         if (!peerAlive() && empty()) {
           return false;
         }
+        ::sched_yield(); // degrade gracefully when oversubscribed
         spins = 0;
       }
     }
