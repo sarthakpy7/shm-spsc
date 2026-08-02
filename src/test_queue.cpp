@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "common.h"
@@ -318,6 +319,138 @@ void testSegmentUnlinkedOnDestruct() {
   CHECK(!ShmSegment::exists("/shmspsc_ta"));
 }
 
+// ------------------------------------------------------- move semantics
+
+// A defaulted move copied ctrl_/slots_/bound_ member wise, leaving two handles
+// each believing they owned the segment. These pin that down.
+void testMoveSemantics() {
+  section("move semantics");
+  using Q = ShmSpscQueue<std::uint64_t>;
+  const std::int32_t self = static_cast<std::int32_t>(::getpid());
+
+  // 1. Move construction transfers ownership and nulls the source.
+  {
+    const char *name = "/shmspsc_move_1";
+    ShmSegment::remove(name);
+    auto src = Q::create(name, 4, Role::Producer);
+    auto dst = std::move(src);
+
+    CHECK(src.control() == nullptr);
+    CHECK(!src.valid());
+    CHECK(dst.valid());
+    CHECK(dst.capacity() == 4);
+    CHECK(dst.control()->producerPid.load() == self);
+    ShmSegment::remove(name);
+  }
+
+  // 2. The moved-from handle destructs first; the destination stays usable.
+  {
+    const char *name = "/shmspsc_move_2";
+    ShmSegment::remove(name);
+    Q dst;
+    {
+      auto src = Q::create(name, 4, Role::Producer);
+      dst = std::move(src);
+    } // src (moved-from, now empty) destructs here
+
+    CHECK(dst.valid());
+    CHECK(dst.control()->producerPid.load() == self);
+    std::uint64_t v = 0;
+    CHECK(dst.try_push(7));
+    CHECK(dst.try_pop(v));
+    CHECK(v == 7);
+    ShmSegment::remove(name);
+  }
+
+  // 3. Reverse order: destination destructs first, then the moved-from source.
+  //    Locals destruct in reverse declaration order, so declaring src first
+  //    makes dst die first. This is the ordering that used to segfault.
+  {
+    const char *name = "/shmspsc_move_3";
+    ShmSegment::remove(name);
+    {
+      auto src = Q::create(name, 4, Role::Producer);
+      auto dst = std::move(src);
+      CHECK(dst.valid());
+    }
+    CHECK(true); // reaching here at all is the assertion
+    ShmSegment::remove(name);
+  }
+
+  // 4. Move assignment releases whatever the target already held.
+  {
+    const char *a = "/shmspsc_move_4a";
+    const char *b = "/shmspsc_move_4b";
+    ShmSegment::remove(a);
+    ShmSegment::remove(b);
+
+    auto qa = Q::create(a, 4, Role::Producer);
+    auto qb = Q::create(b, 8, Role::Producer);
+    CHECK(ShmSegment::exists(a));
+    CHECK(ShmSegment::exists(b));
+
+    qa = std::move(qb);
+
+    CHECK(!ShmSegment::exists(a)); // target's old segment unlinked
+    CHECK(ShmSegment::exists(b));
+    CHECK(qa.valid());
+    CHECK(qa.capacity() == 8);
+    CHECK(qa.control()->producerPid.load() == self);
+    CHECK(!qb.valid());
+    CHECK(qb.control() == nullptr);
+
+    ShmSegment::remove(a);
+    ShmSegment::remove(b);
+  }
+
+  // 5. Self-move-assignment is a no-op, not a self-destruct.
+  {
+    const char *name = "/shmspsc_move_5";
+    ShmSegment::remove(name);
+    auto q = Q::create(name, 4, Role::Producer);
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wself-move"
+#endif
+    q = std::move(q); // deliberate: the guard in operator= must catch this
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
+    CHECK(q.valid());
+    CHECK(q.capacity() == 4);
+    CHECK(q.control()->producerPid.load() == self);
+    std::uint64_t v = 0;
+    CHECK(q.try_push(11));
+    CHECK(q.try_pop(v));
+    CHECK(v == 11);
+    ShmSegment::remove(name);
+  }
+
+  // 6. Queued data and the index caches survive the move.
+  {
+    const char *name = "/shmspsc_move_6";
+    ShmSegment::remove(name);
+    auto src = Q::create(name, 8, Role::Producer);
+    CHECK(src.try_push(10));
+    CHECK(src.try_push(20));
+    CHECK(src.try_push(30));
+    CHECK(src.size() == 3);
+
+    auto dst = std::move(src);
+    CHECK(dst.size() == 3);
+
+    std::uint64_t v = 0;
+    CHECK(dst.try_pop(v));
+    CHECK(v == 10);
+    CHECK(dst.try_pop(v));
+    CHECK(v == 20);
+    CHECK(dst.try_pop(v));
+    CHECK(v == 30);
+    CHECK(dst.empty());
+    ShmSegment::remove(name);
+  }
+}
+
 // -------------------------------------------------------- cross-process
 
 // The real test: a separate process, its own address space, its own mapping.
@@ -496,6 +629,7 @@ int main(int argc, char **argv) {
   testDoubleAttachRefused();
   testNameValidation();
   testSegmentUnlinkedOnDestruct();
+  testMoveSemantics();
   testCrossProcess(total, 1024);
   testCrossProcess(total / 4, 2); // pathologically small: constant contention
   testCrossProcessBatched(total, 1024);
