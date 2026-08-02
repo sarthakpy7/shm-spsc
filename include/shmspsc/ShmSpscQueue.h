@@ -157,7 +157,7 @@ public:
     q.seg_ = ShmSegment::create(name, bytesNeeded(capacity));
     q.ctrl_ = static_cast<ControlBlock *>(q.seg_.data());
 
-    std::memset(q.ctrl_, 0, sizeof(ControlBlock));
+    std::memset(static_cast<void *>(q.ctrl_), 0, sizeof(ControlBlock));
     q.ctrl_->magic = kMagic;
     q.ctrl_->version = kVersion;
     q.ctrl_->cacheLineSize = static_cast<std::uint32_t>(kCacheLine);
