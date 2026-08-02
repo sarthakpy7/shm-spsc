@@ -303,12 +303,20 @@ public:
     }
   }
 
+  // Instantaneous estimate only. The two index loads are not atomic with
+  // respect to each other: if the peer advances between them, usedSlots() can
+  // take the wrap branch and report a value near capacity for a nearly empty
+  // queue. Intended for diagnostics, tests and demos -- not for control flow.
+  // Callers needing an exact answer must use the return value of try_push,
+  // try_pop or front, which is authoritative by construction.
   std::size_t size() const noexcept {
     const std::uint64_t w = ctrl_->writeIdx.load(std::memory_order_acquire);
     const std::uint64_t r = ctrl_->readIdx.load(std::memory_order_acquire);
     return usedSlots(w, r);
   }
 
+  // Same caveat as size(): a transiently inconsistent snapshot under concurrent
+  // access. Diagnostics only; branch on front() == nullptr or try_pop instead.
   bool empty() const noexcept {
     return ctrl_->writeIdx.load(std::memory_order_acquire) ==
            ctrl_->readIdx.load(std::memory_order_acquire);

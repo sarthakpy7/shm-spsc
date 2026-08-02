@@ -200,6 +200,11 @@ Shared-memory bugs do not reproduce in a single process, so most of the suite
 - `T` must be trivially copyable and self-contained.
 - Both binaries must agree on `sizeof(T)`, alignment and cache line size —
   checked at attach, so a mismatch is a clean error, not corruption.
+- `size()` and `empty()` are instantaneous estimates. They load the two indices
+  separately, so a peer advancing in between can make the result transiently
+  inconsistent — `size()` may even report near-capacity for a nearly empty
+  queue. Use them for diagnostics; branch on `try_push` / `try_pop` / `front`,
+  which are exact.
 - `peerAlive()` uses `kill(pid, 0)`; PID reuse makes it advisory.
 - A producer killed mid-`push_n` can leave a partial batch unpublished. The
   index only advances after the copy completes, so the reader never sees a torn
