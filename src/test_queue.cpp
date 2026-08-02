@@ -4,6 +4,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
@@ -481,6 +482,42 @@ void testProcessAlive() {
   CHECK(shmspsc::processAlive(1));
 }
 
+void testAttachTimeout() {
+  section("attach honours a wall-clock deadline");
+  const char *name = "/shmspsc_tmo";
+  ShmSegment::remove(name);
+
+  // No such segment: attach must give up close to the requested 300 ms rather
+  // than after 300 iterations of unknown duration.
+  const auto t0 = std::chrono::steady_clock::now();
+  bool threw = false;
+  try {
+    ShmSpscQueue<Message>::attach(name, Role::Consumer, 300);
+  } catch (const std::exception &) {
+    threw = true;
+  }
+  const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - t0)
+                             .count();
+  CHECK(threw);
+  CHECK(elapsedMs >= 300);
+  if (elapsedMs > 1500) {
+    std::printf("  attach(300ms) took %lldms\n",
+                static_cast<long long>(elapsedMs));
+  }
+  CHECK(elapsedMs <= 1500);
+
+  // waitForPeer uses the same deadline scheme.
+  auto q = ShmSpscQueue<Message>::create("/shmspsc_tmo2", 4, Role::Producer);
+  const auto t1 = std::chrono::steady_clock::now();
+  CHECK(!q.waitForPeer(200));
+  const auto waitedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - t1)
+                            .count();
+  CHECK(waitedMs >= 200);
+  CHECK(waitedMs <= 1500);
+}
+
 // ------------------------------------------------------- move semantics
 
 // A defaulted move copied ctrl_/slots_/bound_ member wise, leaving two handles
@@ -795,6 +832,7 @@ int main(int argc, char **argv) {
   testSegmentUnlinkedOnDestruct();
   testProcessAlive();
   testConcurrentReclamation();
+  testAttachTimeout();
   testMoveSemantics();
   testCrossProcess(total, 1024);
   testCrossProcess(total / 4, 2); // pathologically small: constant contention

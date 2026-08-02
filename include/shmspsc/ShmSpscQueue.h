@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cassert>
 #include <cerrno>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -173,11 +174,17 @@ public:
     return q;
   }
 
-  // timeoutMs > 0 polls until the creator publishes `ready`.
+  // timeoutMs > 0 polls until the creator publishes `ready`. The bound is a
+  // real deadline: counting loop iterations instead would ignore the time spent
+  // inside open() and validate(), so a loaded machine could overrun the
+  // requested timeout without limit.
   static ShmSpscQueue attach(const std::string &name, Role role,
                              unsigned timeoutMs = 0) {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
     ShmSpscQueue q;
-    for (unsigned waited = 0;; waited += 1) {
+    for (;;) {
+      const bool lastAttempt = std::chrono::steady_clock::now() >= deadline;
       try {
         q.seg_ = ShmSegment::open(name);
         q.ctrl_ = static_cast<ControlBlock *>(q.seg_.data());
@@ -185,11 +192,11 @@ public:
           break;
         }
       } catch (const std::exception &) {
-        if (waited >= timeoutMs) {
+        if (lastAttempt) {
           throw;
         }
       }
-      if (waited >= timeoutMs) {
+      if (lastAttempt) {
         throw std::runtime_error("timed out waiting for " + name);
       }
       ::usleep(1000);
@@ -380,9 +387,13 @@ public:
   const std::string &name() const noexcept { return seg_.name(); }
   bool valid() const noexcept { return ctrl_ != nullptr; }
 
-  // Blocks until the peer has attached. Returns false on timeout.
+  // Blocks until the peer has attached. Returns false on timeout. Deadline
+  // based for the same reason as attach(): usleep(1000) sleeps *at least* a
+  // millisecond, so counting iterations understates elapsed time.
   bool waitForPeer(unsigned timeoutMs) const noexcept {
-    for (unsigned waited = 0;; ++waited) {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+    for (;;) {
       const std::int32_t pid =
           (role_ == Role::Producer)
               ? ctrl_->consumerPid.load(std::memory_order_acquire)
@@ -390,7 +401,7 @@ public:
       if (pid > 0) {
         return true;
       }
-      if (waited >= timeoutMs) {
+      if (std::chrono::steady_clock::now() >= deadline) {
         return false;
       }
       ::usleep(1000);
