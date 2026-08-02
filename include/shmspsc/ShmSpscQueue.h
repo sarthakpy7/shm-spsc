@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -116,7 +117,16 @@ public:
     std::swap(writeIdxCache_, o.writeIdxCache_);
   }
 
+  // Throws rather than wrapping around and quietly allocating a tiny segment
+  // that every index calculation would then run off the end of.
   static std::size_t bytesNeeded(std::size_t capacity) {
+    constexpr std::size_t kMax = std::numeric_limits<std::size_t>::max();
+    if (capacity == kMax ||
+        (capacity + 1) > (kMax - sizeof(ControlBlock)) / sizeof(T)) {
+      throw std::invalid_argument(
+          "capacity " + std::to_string(capacity) + " x " +
+          std::to_string(sizeof(T)) + " bytes overflows size_t");
+    }
     return sizeof(ControlBlock) + (capacity + 1) * sizeof(T);
   }
 
@@ -128,7 +138,7 @@ public:
     const std::uint64_t slots = static_cast<std::uint64_t>(capacity) + 1;
 
     ShmSpscQueue q;
-    q.seg_ = ShmSegment::create(name, sizeof(ControlBlock) + slots * sizeof(T));
+    q.seg_ = ShmSegment::create(name, bytesNeeded(capacity));
     q.ctrl_ = static_cast<ControlBlock *>(q.seg_.data());
 
     std::memset(q.ctrl_, 0, sizeof(ControlBlock));
@@ -194,6 +204,11 @@ public:
 
   // Copies as many of `n` as fit. Returns how many were written.
   std::size_t push_n(const T *src, std::size_t n) noexcept {
+    // Bail before the release store: republishing an unchanged index still
+    // dirties the line and costs the peer a coherency miss.
+    if (n == 0) {
+      return 0;
+    }
     const std::uint64_t w = ctrl_->writeIdx.load(std::memory_order_relaxed);
     std::uint64_t free = freeSlots(w, readIdxCache_);
     if (free < n) {
@@ -255,6 +270,9 @@ public:
   }
 
   std::size_t pop_n(T *dst, std::size_t n) noexcept {
+    if (n == 0) { // see push_n
+      return 0;
+    }
     const std::uint64_t r = ctrl_->readIdx.load(std::memory_order_relaxed);
     std::uint64_t avail = usedSlots(writeIdxCache_, r);
     if (avail < n) {

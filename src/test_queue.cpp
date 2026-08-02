@@ -6,6 +6,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -220,6 +221,66 @@ void testBatchMatchesSingle() {
     }
   }
   CHECK(ok);
+}
+
+void testBatchZeroLength() {
+  section("zero-length batch is a no-op");
+  auto q = ShmSpscQueue<std::uint64_t>::create("/shmspsc_tz", 8, Role::Producer);
+
+  std::uint64_t buf[4] = {1, 2, 3, 4};
+  CHECK(q.push_n(buf, 3) == 3);
+  CHECK(q.size() == 3);
+
+  const std::uint64_t w = q.control()->writeIdx.load();
+  const std::uint64_t r = q.control()->readIdx.load();
+
+  CHECK(q.push_n(buf, 0) == 0);
+  CHECK(q.pop_n(buf, 0) == 0);
+
+  // Neither index republished: no spurious release store, no dirtied line.
+  CHECK(q.size() == 3);
+  CHECK(q.control()->writeIdx.load() == w);
+  CHECK(q.control()->readIdx.load() == r);
+
+  // The queue still works normally afterwards.
+  std::uint64_t out[3] = {};
+  CHECK(q.pop_n(out, 3) == 3);
+  CHECK(out[0] == 1);
+  CHECK(out[1] == 2);
+  CHECK(out[2] == 3);
+  CHECK(q.empty());
+}
+
+void testCapacityOverflow() {
+  section("pathological capacity is rejected");
+  constexpr std::size_t kMax = std::numeric_limits<std::size_t>::max();
+
+  CHECK(ShmSpscQueue<std::uint64_t>::bytesNeeded(8) ==
+        sizeof(shmspsc::ControlBlock) + 9 * sizeof(std::uint64_t));
+
+  auto overflows = [](std::size_t capacity) {
+    try {
+      ShmSpscQueue<Message>::bytesNeeded(capacity);
+    } catch (const std::invalid_argument &) {
+      return true;
+    }
+    return false;
+  };
+  CHECK(overflows(kMax));
+  CHECK(overflows(kMax / 2));
+  CHECK(overflows(kMax / sizeof(Message)));
+  CHECK(!overflows(1024));
+
+  // create() routes through bytesNeeded, so it throws instead of allocating a
+  // wrapped-around size.
+  bool threw = false;
+  try {
+    ShmSpscQueue<Message>::create("/shmspsc_tov", kMax / 2, Role::Producer);
+  } catch (const std::invalid_argument &) {
+    threw = true;
+  }
+  CHECK(threw);
+  CHECK(!ShmSegment::exists("/shmspsc_tov"));
 }
 
 // ------------------------------------------------------- attach validation
@@ -639,6 +700,8 @@ int main(int argc, char **argv) {
   testBatch();
   testBatchWrap();
   testBatchMatchesSingle();
+  testBatchZeroLength();
+  testCapacityOverflow();
   testAttachValidation();
   testDoubleAttachRefused();
   testNameValidation();
