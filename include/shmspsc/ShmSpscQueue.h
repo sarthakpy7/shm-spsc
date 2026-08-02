@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -229,9 +230,13 @@ public:
     return &slots_[r];
   }
 
-  // Precondition: front() returned non-null.
+  // Precondition: front() returned non-null. Popping an empty queue advances
+  // readIdx past writeIdx and corrupts the ring, so it is checked in debug
+  // builds; -DNDEBUG compiles the check away entirely.
   void pop() noexcept {
     const std::uint64_t r = ctrl_->readIdx.load(std::memory_order_relaxed);
+    assert(ctrl_->writeIdx.load(std::memory_order_acquire) != r &&
+           "pop() requires a preceding front() that returned non-null");
     std::uint64_t next = r + 1;
     if (next == capacity_) {
       next = 0;

@@ -112,6 +112,20 @@ void testFrontPop() {
   CHECK(q.front() == p); // peeking does not consume
   q.pop();
   CHECK(q.front() == nullptr);
+
+  // Ring state stays consistent through repeated correct front()/pop() pairs:
+  // readIdx must never overrun writeIdx.
+  for (std::uint64_t i = 0; i < 20; ++i) {
+    CHECK(q.try_push(i));
+    CHECK(q.size() == 1);
+    const std::uint64_t *f = q.front();
+    CHECK(f != nullptr);
+    CHECK(f != nullptr && *f == i);
+    q.pop();
+    CHECK(q.size() == 0);
+    CHECK(q.empty());
+  }
+  CHECK(q.control()->readIdx.load() == q.control()->writeIdx.load());
 }
 
 // ---------------------------------------------------------------- batching

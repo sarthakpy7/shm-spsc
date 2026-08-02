@@ -1,6 +1,8 @@
 CXX      ?= c++
 CXXSTD   ?= -std=c++17
-OPT      ?= -O3
+# -DNDEBUG compiles out the debug-only precondition assert in pop().
+# The asan/tsan targets override OPT and therefore keep asserts live.
+OPT      ?= -O3 -DNDEBUG
 WARN     := -Wall -Wextra -Wpedantic -Wshadow
 
 # Some macOS Command Line Tools installs ship a truncated libc++ header set in
