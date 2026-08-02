@@ -394,6 +394,93 @@ void testSegmentUnlinkedOnDestruct() {
   CHECK(!ShmSegment::exists("/shmspsc_ta"));
 }
 
+// End-state invariant: however many processes stampede a stale pid slot, only
+// one may end up owning it.
+//
+// Caveat, stated honestly: this does NOT reproduce the original plain-store
+// race. That window is a few instructions wide -- between processAlive()
+// returning false and the store landing -- and forked processes cannot be
+// synchronised anywhere near tightly enough to land inside it. The test passes
+// against the buggy version too. It guards the invariant against grosser
+// regressions; the CAS is justified by reasoning, not by this test failing.
+void testConcurrentReclamation() {
+  section("stale pid reclaimed by exactly one racer");
+  const char *name = "/shmspsc_race";
+  ShmSegment::remove(name);
+  auto q = ShmSpscQueue<Message>::create(name, 8, Role::Producer);
+
+  // Leave a stale consumer pid: _exit skips detach, so the pid stays behind.
+  const pid_t seed = ::fork();
+  if (seed == 0) {
+    auto c = ShmSpscQueue<Message>::attach(name, Role::Consumer, 5000);
+    ::_exit(0);
+  }
+  ::waitpid(seed, nullptr, 0);
+  CHECK(q.control()->consumerPid.load() == static_cast<std::int32_t>(seed));
+
+  constexpr int kRacers = 8;
+  int gate[2];
+  CHECK(::pipe(gate) == 0);
+
+  pid_t pids[kRacers];
+  for (int i = 0; i < kRacers; ++i) {
+    pids[i] = ::fork();
+    if (pids[i] == 0) {
+      ::close(gate[1]);
+      char go = 0;
+      ssize_t ignored = ::read(gate[0], &go, 1); // unblocks at EOF
+      (void)ignored;
+      int rc = 1;
+      try {
+        auto c = ShmSpscQueue<Message>::attach(name, Role::Consumer);
+        // Hold the slot so the losers observe a genuinely live owner rather
+        // than a pid that has already gone stale again.
+        ::usleep(400000);
+        rc = 0;
+      } catch (const std::exception &) {
+        rc = 1;
+      }
+      ::_exit(rc);
+    }
+  }
+
+  ::close(gate[0]);
+  ::close(gate[1]); // releases all racers at once
+
+  int winners = 0;
+  for (int i = 0; i < kRacers; ++i) {
+    int status = 0;
+    ::waitpid(pids[i], &status, 0);
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+      ++winners;
+    }
+  }
+  if (winners != 1) {
+    std::printf("  %d of %d racers claimed the slot (expected 1)\n", winners,
+                kRacers);
+  }
+  CHECK(winners == 1);
+  ShmSegment::remove(name);
+}
+
+void testProcessAlive() {
+  section("process liveness probe");
+  CHECK(shmspsc::processAlive(static_cast<std::int32_t>(::getpid())));
+  CHECK(!shmspsc::processAlive(0));  // never claimed
+  CHECK(!shmspsc::processAlive(-1)); // clean detach marker
+
+  const pid_t child = ::fork();
+  if (child == 0) {
+    ::_exit(0);
+  }
+  ::waitpid(child, nullptr, 0); // reaped, so the pid is genuinely gone
+  CHECK(!shmspsc::processAlive(static_cast<std::int32_t>(child)));
+
+  // pid 1 (launchd/init) exists but is not signalable by a normal user: the
+  // EPERM path must report alive, not dead.
+  CHECK(shmspsc::processAlive(1));
+}
+
 // ------------------------------------------------------- move semantics
 
 // A defaulted move copied ctrl_/slots_/bound_ member wise, leaving two handles
@@ -706,6 +793,8 @@ int main(int argc, char **argv) {
   testDoubleAttachRefused();
   testNameValidation();
   testSegmentUnlinkedOnDestruct();
+  testProcessAlive();
+  testConcurrentReclamation();
   testMoveSemantics();
   testCrossProcess(total, 1024);
   testCrossProcess(total / 4, 2); // pathologically small: constant contention

@@ -423,19 +423,32 @@ private:
 
     auto &slot =
         (role == Role::Producer) ? ctrl_->producerPid : ctrl_->consumerPid;
-    std::int32_t expected = 0;
     const std::int32_t self = static_cast<std::int32_t>(::getpid());
-    if (!slot.compare_exchange_strong(expected, self,
-                                      std::memory_order_acq_rel)) {
-      // Slot taken. Only a *different, still running* process is a conflict; a
-      // stale pid from a crashed peer is reclaimed.
-      if (expected > 0 && expected != self && processAlive(expected)) {
+
+    // Claiming the slot must be a single atomic step. A liveness check followed
+    // by a plain store lets two processes both observe the same stale pid,
+    // both judge it dead, and both store -- last writer wins and *both* believe
+    // they are the sole owner. The CAS makes exactly one win; the loser re-reads
+    // the winner's pid, finds it alive, and throws.
+    std::int32_t expected = slot.load(std::memory_order_acquire);
+    for (;;) {
+      if (expected == self) {
+        break; // re-attach from this same process
+      }
+      // 0 means never claimed, -1 a clean detach; anything else is a live
+      // conflict unless the process behind it is gone.
+      if (expected > 0 && processAlive(expected)) {
         throw std::runtime_error(
             std::string("a live ") +
             (role == Role::Producer ? "producer" : "consumer") +
             " is already attached (pid " + std::to_string(expected) + ")");
       }
-      slot.store(self, std::memory_order_release);
+      if (slot.compare_exchange_weak(expected, self, std::memory_order_acq_rel,
+                                     std::memory_order_acquire)) {
+        break;
+      }
+      // CAS failed: `expected` now holds the current value. Re-evaluate it --
+      // a competing process may have just claimed the slot.
     }
     bound_ = true;
   }
