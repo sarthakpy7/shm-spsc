@@ -8,6 +8,7 @@
 
 #include <cerrno>
 #include <cstddef>
+#include <stdexcept>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -62,10 +63,17 @@ public:
       throwErrno("shm_open " + name + " (is the peer running?)", errno);
     }
     struct stat st {};
-    if (::fstat(fd, &st) != 0 || st.st_size <= 0) {
+    if (::fstat(fd, &st) != 0) {
       const int e = errno;
       ::close(fd);
-      throwErrno("fstat " + name, e ? e : EINVAL);
+      throwErrno("fstat " + name, e);
+    }
+    // Separate case: errno is unspecified after a *successful* fstat, so
+    // reporting it would attach an arbitrary strerror string to a size problem.
+    if (st.st_size <= 0) {
+      ::close(fd);
+      throw std::runtime_error("shm object " + name +
+                               " has zero size (peer still initialising?)");
     }
     return mapAndClose(fd, name, static_cast<std::size_t>(st.st_size), false);
   }
