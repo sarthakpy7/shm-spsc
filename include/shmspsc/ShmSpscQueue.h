@@ -12,6 +12,7 @@
 #include <stdexcept>
 #include <string>
 #include <type_traits>
+#include <utility> // std::swap
 
 #include "shmspsc/ShmSegment.h"
 
@@ -85,9 +86,34 @@ public:
   ShmSpscQueue() = default;
   ShmSpscQueue(const ShmSpscQueue &) = delete;
   ShmSpscQueue &operator=(const ShmSpscQueue &) = delete;
-  ShmSpscQueue(ShmSpscQueue &&) = default;
-  ShmSpscQueue &operator=(ShmSpscQueue &&) = default;
+
+  // Not `= default`. A defaulted move copies ctrl_, slots_ and bound_ member
+  // wise, so the moved-from handle still believes it owns the segment. Both
+  // destructors then run detach(): the second clears a pid slot it no longer
+  // owns and dereferences memory the first already munmapped. Swap instead, so
+  // the source is left null and unbound.
+  ShmSpscQueue(ShmSpscQueue &&o) noexcept { swapWith(o); }
+
+  ShmSpscQueue &operator=(ShmSpscQueue &&o) noexcept {
+    if (this != &o) {
+      detach(); // release whatever this handle held first
+      swapWith(o);
+    }
+    return *this;
+  }
+
   ~ShmSpscQueue() { detach(); }
+
+  void swapWith(ShmSpscQueue &o) noexcept {
+    std::swap(seg_, o.seg_);
+    std::swap(ctrl_, o.ctrl_);
+    std::swap(slots_, o.slots_);
+    std::swap(capacity_, o.capacity_);
+    std::swap(role_, o.role_);
+    std::swap(bound_, o.bound_);
+    std::swap(readIdxCache_, o.readIdxCache_);
+    std::swap(writeIdxCache_, o.writeIdxCache_);
+  }
 
   static std::size_t bytesNeeded(std::size_t capacity) {
     return sizeof(ControlBlock) + (capacity + 1) * sizeof(T);
