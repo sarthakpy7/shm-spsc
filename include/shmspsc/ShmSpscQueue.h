@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cassert>
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -31,6 +32,20 @@ namespace shmspsc {
 inline constexpr std::size_t kCacheLine = SHMSPSC_CACHE_LINE_SIZE;
 
 enum class Role { Producer, Consumer };
+
+// kill(pid, 0) fails both when the process is gone (ESRCH) and when we merely
+// may not signal it (EPERM -- a peer running as another user). Only ESRCH means
+// dead; treating EPERM as dead would let a second producer reclaim a slot that
+// is still in use and silently break the SPSC invariant.
+inline bool processAlive(std::int32_t pid) noexcept {
+  if (pid <= 0) {
+    return false;
+  }
+  if (::kill(static_cast<pid_t>(pid), 0) == 0) {
+    return true;
+  }
+  return errno != ESRCH;
+}
 
 // Lives at offset 0 of the shared segment. Layout is part of the wire format:
 // both processes compile it independently and must agree byte for byte.
@@ -358,7 +373,7 @@ public:
     if (pid == 0) {
       return true; // peer has not attached yet
     }
-    return pid > 0 && ::kill(pid, 0) == 0;
+    return processAlive(pid); // -1 (clean detach) reports dead
   }
 
   const ControlBlock *control() const noexcept { return ctrl_; }
@@ -414,7 +429,7 @@ private:
                                       std::memory_order_acq_rel)) {
       // Slot taken. Only a *different, still running* process is a conflict; a
       // stale pid from a crashed peer is reclaimed.
-      if (expected > 0 && expected != self && ::kill(expected, 0) == 0) {
+      if (expected > 0 && expected != self && processAlive(expected)) {
         throw std::runtime_error(
             std::string("a live ") +
             (role == Role::Producer ? "producer" : "consumer") +
